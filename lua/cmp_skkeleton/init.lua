@@ -75,18 +75,18 @@ source.complete = function(self, request, callback)
 				-- - 保管: rank=-196 → normalized=9804 → "09804_保管"
 				local normalized_rank = rank + 10000 -- マイナス値を避けるためにオフセットを追加
 
-				print(
-					string.format(
-						"Processing: %s, Kana: %s(%d), input_kana_length: %d, base_rank: %d, rank: %d, normalized_rank: %d",
-						label,
-						kana,
-						actual_kana_length,
-						input_kana_length,
-						base_rank,
-						rank,
-						normalized_rank
-					)
-				)
+				-- print(
+				-- 	string.format(
+				-- 		"Processing: %s, Kana: %s(%d), input_kana_length: %d, base_rank: %d, rank: %d, normalized_rank: %d",
+				-- 		label,
+				-- 		kana,
+				-- 		actual_kana_length,
+				-- 		input_kana_length,
+				-- 		base_rank,
+				-- 		rank,
+				-- 		normalized_rank
+				-- 	)
+				-- )
 
 				local sort_text = string.format("%05d_%s", normalized_rank, label)
 				local item = {
@@ -108,7 +108,7 @@ source.complete = function(self, request, callback)
 					sortText = sort_text,
 				}
 
-				print(string.format("  -> sortText: %s", sort_text))
+				-- print(string.format("  -> sortText: %s", sort_text))
 
 				local document = string.match(c, [[;.*$]])
 				if document then
