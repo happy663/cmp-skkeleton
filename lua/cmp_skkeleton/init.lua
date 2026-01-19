@@ -13,7 +13,12 @@ source.get_debug_name = function()
 end
 
 source.get_keyword_pattern = function()
-	return [[\%([ぁ-ゖ]\+\)]]
+	local mode = vim.g["skkeleton#mode"]
+	if mode == "abbrev" then
+		return [[\%([a-zA-Z]\+\)]]
+	else
+		return [[\%([ぁ-ゖ]\+\)]]
+	end
 end
 
 source.complete = function(self, request, callback)
@@ -91,19 +96,7 @@ source.complete = function(self, request, callback)
 				local sort_text = string.format("%05d_%s", normalized_rank, label)
 				local item = {
 					label = label,
-					textEdit = {
-						range = {
-							start = {
-								line = request.context.cursor.line,
-								character = request.context.cursor.character - preeditlen,
-							},
-							["end"] = {
-								line = request.context.cursor.line,
-								character = request.context.cursor.character,
-							},
-						},
-						newText = label,
-					},
+					word = label,
 					filterText = kana,
 					sortText = sort_text,
 				}
@@ -167,3 +160,4 @@ source._register_henkan_result = function(_, kana, word)
 end
 
 return source
+
