@@ -159,5 +159,162 @@ source._register_henkan_result = function(_, kana, word)
 	return vim.fn["denops#request"]("skkeleton", "registerHenkanResult", { kana, word })
 end
 
-return source
+source._get_rank_file_path = function(_)
+	local config = vim.fn["denops#request"]("skkeleton", "getConfig", {})
+	return config.completionRankFile
+end
+
+source._get_user_dictionary_path = function(_)
+	local config = vim.fn["denops#request"]("skkeleton", "getConfig", {})
+	return config.userDictionary
+end
+
+-- ユーザー辞書から候補を削除する
+-- 注: skkeletonには内部的にpurgeCandidate関数があるが、denops#requestで
+-- 外部から呼び出せるAPIとして公開されていないため、辞書ファイルを直接編集する
+source.remove_from_user_dictionary = function(self, kana, candidate)
+	local dict_file = self:_get_user_dictionary_path()
+	if not dict_file or dict_file == "" then
+		vim.notify("userDictionary is not configured", vim.log.levels.WARN)
+		return false
+	end
+
+	-- ユーザー辞書を読み込み
+	local file = io.open(dict_file, "r")
+	if not file then
+		vim.notify("Failed to open user dictionary: " .. dict_file, vim.log.levels.ERROR)
+		return false
+	end
+
+	local lines = {}
+	local removed = false
+	for line in file:lines() do
+		-- SKK辞書形式: "読み /候補1/候補2/候補3/"
+		local line_kana = line:match("^(%S+)%s")
+		if line_kana == kana then
+			-- この行から候補を削除
+			local new_line = line:gsub("/" .. vim.pesc(candidate) .. "/", "/")
+			-- 候補が空になったら行自体を削除
+			if new_line:match("^%S+%s+/$") then
+				removed = true
+				-- 行を追加しない（削除）
+			elseif new_line ~= line then
+				removed = true
+				table.insert(lines, new_line)
+			else
+				table.insert(lines, line)
+			end
+		else
+			table.insert(lines, line)
+		end
+	end
+	file:close()
+
+	if not removed then
+		return false
+	end
+
+	-- ユーザー辞書を書き戻し
+	file = io.open(dict_file, "w")
+	if not file then
+		vim.notify("Failed to write user dictionary: " .. dict_file, vim.log.levels.ERROR)
+		return false
+	end
+
+	file:write(table.concat(lines, "\n"))
+	if #lines > 0 then
+		file:write("\n")
+	end
+	file:close()
+
+	return true
+end
+
+source.remove_from_rank = function(self, candidate)
+	local rank_file = self:_get_rank_file_path()
+	if not rank_file or rank_file == "" then
+		vim.notify("completionRankFile is not configured", vim.log.levels.WARN)
+		return false
+	end
+
+	-- ランクファイルを読み込み
+	local file = io.open(rank_file, "r")
+	if not file then
+		vim.notify("Failed to open rank file: " .. rank_file, vim.log.levels.ERROR)
+		return false
+	end
+
+	local content = file:read("*a")
+	file:close()
+
+	-- JSONをパース
+	local ok, ranks = pcall(vim.json.decode, content)
+	if not ok or type(ranks) ~= "table" then
+		vim.notify("Failed to parse rank file", vim.log.levels.ERROR)
+		return false
+	end
+
+	-- 候補を配列から削除
+	local new_ranks = {}
+	local removed = false
+	for _, rank in ipairs(ranks) do
+		if rank ~= candidate then
+			table.insert(new_ranks, rank)
+		else
+			removed = true
+		end
+	end
+
+	if not removed then
+		vim.notify("Candidate not found in rank: " .. candidate, vim.log.levels.INFO)
+		return false
+	end
+
+	-- ランクファイルを書き戻し
+	file = io.open(rank_file, "w")
+	if not file then
+		vim.notify("Failed to write rank file: " .. rank_file, vim.log.levels.ERROR)
+		return false
+	end
+
+	file:write(vim.json.encode(new_ranks))
+	file:close()
+
+	return true
+end
+
+local M = {}
+
+M.new = function()
+	return source.new()
+end
+
+M.remove_from_rank = function(candidate)
+	return source:remove_from_rank(candidate)
+end
+
+M.remove_from_user_dictionary = function(kana, candidate)
+	return source:remove_from_user_dictionary(kana, candidate)
+end
+
+-- ランクとユーザー辞書の両方から削除
+M.purge_candidate = function(kana, candidate)
+	local rank_removed = source:remove_from_rank(candidate)
+	local dict_removed = source:remove_from_user_dictionary(kana, candidate)
+
+	if rank_removed and dict_removed then
+		vim.notify("Purged from rank and dictionary: " .. candidate, vim.log.levels.INFO)
+	elseif rank_removed then
+		vim.notify("Removed from rank: " .. candidate, vim.log.levels.INFO)
+	elseif dict_removed then
+		vim.notify("Removed from dictionary: " .. candidate, vim.log.levels.INFO)
+	else
+		vim.notify("Not found: " .. candidate, vim.log.levels.INFO)
+	end
+
+	return rank_removed or dict_removed
+end
+
+return M
+
 
