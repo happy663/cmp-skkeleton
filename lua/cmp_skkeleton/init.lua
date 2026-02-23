@@ -23,6 +23,7 @@ end
 
 source.complete = function(self, request, callback)
 	local candidates = self:_get_completion_result()
+
 	local preeditlen = self:_get_pre_edit_length()
 	local ranks = self:_get_ranks()
 
@@ -51,6 +52,12 @@ source.complete = function(self, request, callback)
 	end
 	local base_kana_length = get_base_kana_length(candidates)
 
+	-- ユーザー辞書ではない候補の優先度を保持するためのインデックス
+	-- 例: SKK_JISYO.Lの以下の順番を保持する
+	-- かんとう /関東/巻頭/完投/竿頭/敢闘/間道;舶来の織物/竿灯/完答/冠頭/
+	-- https://github.com/happy663/dotfiles/issues/196
+	local idx = 0
+
 	for _, cs in pairs(candidates) do
 		local kana = cs[1]
 
@@ -62,6 +69,7 @@ source.complete = function(self, request, callback)
 
 				-- ランク情報から基本優先度を取得
 				local base_rank = rank_map[label] or 9999
+				idx = idx + 1
 
 				-- 読みの長さを考慮したスマートランク計算
 				local actual_kana_length = vim.fn.strchars(kana) -- 実際の読みの文字数
@@ -93,7 +101,7 @@ source.complete = function(self, request, callback)
 				-- 	)
 				-- )
 
-				local sort_text = string.format("%05d_%s", normalized_rank, label)
+				local sort_text = string.format("%05d_%05d_%s", normalized_rank, idx, label) -- ランク、インデックス、ラベルでソート
 				local item = {
 					label = label,
 					word = label,
@@ -316,5 +324,3 @@ M.purge_candidate = function(kana, candidate)
 end
 
 return M
-
-
