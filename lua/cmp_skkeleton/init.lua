@@ -27,6 +27,9 @@ source.complete = function(self, request, callback)
 	local preeditlen = self:_get_pre_edit_length()
 	local ranks = self:_get_ranks()
 
+	-- 送りあり候補を取得
+	local okuri_candidates = self:_get_okuri_candidates()
+
 	-- ランク情報をタイムスタンプで降順ソート（新しい選択が上位に）
 	table.sort(ranks, function(a, b)
 		return a[2] > b[2]
@@ -58,6 +61,7 @@ source.complete = function(self, request, callback)
 	-- https://github.com/happy663/dotfiles/issues/196
 	local idx = 0
 
+	-- 送りなし候補の処理
 	for _, cs in pairs(candidates) do
 		local kana = cs[1]
 
@@ -124,6 +128,36 @@ source.complete = function(self, request, callback)
 		end
 	end
 
+	-- 送りあり候補の処理
+	for _, okuri_item in ipairs(okuri_candidates) do
+		local label = okuri_item.word
+		if not added_labels[label] then
+			added_labels[label] = true
+
+			local base_rank = rank_map[label] or 9999
+			local rank = base_rank + 500 -- 送りありペナルティ
+			local normalized_rank = rank + 10000
+
+			local sort_text = string.format("%05d_%s", normalized_rank, label)
+
+			local item = {
+				label = label,
+				word = label,
+				filterText = okuri_item.kana,
+				sortText = sort_text,
+				documentation = okuri_item.kana,
+				data = {
+					midasi = okuri_item.midasi,
+					okuri = okuri_item.okuri,
+					okuriari = true,
+				},
+			}
+
+			cnt = cnt + 1
+			table.insert(items, item)
+		end
+	end
+
 	if cnt == 0 then
 		callback()
 		return
@@ -142,7 +176,21 @@ end
 source.execute = function(self, completion_item, callback)
 	local kana = completion_item.filterText
 	local word = completion_item.label
-	self:_register_henkan_result(kana, word)
+
+	-- 送りあり候補の場合
+	if completion_item.data and completion_item.data.okuriari then
+		local midasi = completion_item.data.midasi
+		-- 送り仮名を除いた候補本体を取得
+		local okuri = completion_item.data.okuri
+		local okuri_len = vim.fn.strchars(okuri)
+		local word_len = vim.fn.strchars(word)
+		local word_without_okuri = vim.fn.strcharpart(word, 0, word_len - okuri_len)
+
+		vim.fn["denops#request"]("skkeleton", "completeCallback", { midasi, word_without_okuri, "okuriari" })
+	else
+		-- 既存: 送りなし処理
+		self:_register_henkan_result(kana, word)
+	end
 
 	callback(completion_item)
 end
@@ -161,6 +209,53 @@ end
 
 source._get_ranks = function(_)
 	return vim.fn["denops#request"]("skkeleton", "getRanks", {})
+end
+
+source._get_okuri_candidates = function(_)
+	local okuri_module = require("cmp_skkeleton.okuri")
+
+	-- abbrevモードでは無効化
+	local mode = vim.g["skkeleton#mode"]
+	if mode == "abbrev" then
+		return {}
+	end
+
+	-- 現在の入力を取得
+	local ok_prefix, prefix = pcall(vim.fn["denops#request"], "skkeleton", "getPrefix", {})
+	if not ok_prefix or not prefix or prefix == "" then
+		return {}
+	end
+
+	-- 2文字未満は早期リターン（送り仮名分割に最低2文字必要）
+	if vim.fn.strchars(prefix) < 2 then
+		return {}
+	end
+
+	local splits = okuri_module.okuri_splits(prefix)
+	local candidates = {}
+
+	for _, split in ipairs(splits) do
+		local word, okuri = split[1], split[2]
+		local midasi = okuri_module.get_okuri_str(word, okuri)
+
+		-- エラーハンドリング付きで候補取得
+		local ok, cands = pcall(vim.fn["denops#request"], "skkeleton", "getCandidates", { midasi, "okuriari" })
+
+		if ok and cands and type(cands) == "table" then
+			for _, cand in ipairs(cands) do
+				local label = string.gsub(cand, [[;.*$]], "")
+				table.insert(candidates, {
+					word = label .. okuri,
+					kana = prefix,
+					midasi = midasi,
+					okuri = okuri,
+					raw_cand = cand,
+				})
+			end
+		end
+	end
+
+	return candidates
 end
 
 source._register_henkan_result = function(_, kana, word)
@@ -274,8 +369,9 @@ source.remove_from_rank = function(self, candidate)
 	end
 
 	if not removed then
-		vim.notify("Candidate not found in rank: " .. candidate, vim.log.levels.INFO)
-		return false
+		-- ランクファイルに候補がないことは削除の失敗ではない
+		-- 辞書からの削除を妨げないため、trueを返す
+		return true
 	end
 
 	-- ランクファイルを書き戻し
@@ -307,6 +403,30 @@ end
 
 -- ランクとユーザー辞書の両方から削除
 M.purge_candidate = function(kana, candidate)
+	local okuri_module = require("cmp_skkeleton.okuri")
+	local splits = okuri_module.okuri_splits(kana)
+
+	-- 送りあり候補の場合
+	if #splits > 0 then
+		for _, split in ipairs(splits) do
+			local word, okuri = split[1], split[2]
+			local midasi = okuri_module.get_okuri_str(word, okuri)
+
+			-- 候補から送り仮名を除去
+			local okuri_len = vim.fn.strchars(okuri)
+			local cand_len = vim.fn.strchars(candidate)
+			local candidate_without_okuri = vim.fn.strcharpart(candidate, 0, cand_len - okuri_len)
+
+			local dict_removed = source:remove_from_user_dictionary(midasi, candidate_without_okuri)
+			if dict_removed then
+				source:remove_from_rank(candidate)
+				vim.notify("Purged okuriari: " .. candidate, vim.log.levels.INFO)
+				return true
+			end
+		end
+	end
+
+	-- 既存の送りなし処理
 	local rank_removed = source:remove_from_rank(candidate)
 	local dict_removed = source:remove_from_user_dictionary(kana, candidate)
 
