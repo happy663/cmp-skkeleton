@@ -129,7 +129,7 @@ source.complete = function(self, request, callback)
 	end
 
 	-- 送りあり候補の処理
-	for _, okuri_item in ipairs(okuri_candidates) do
+	for index, okuri_item in ipairs(okuri_candidates) do
 		local label = okuri_item.word
 		if not added_labels[label] then
 			added_labels[label] = true
@@ -138,7 +138,7 @@ source.complete = function(self, request, callback)
 			local rank = base_rank + 500 -- 送りありペナルティ
 			local normalized_rank = rank + 10000
 
-			local sort_text = string.format("%05d_%s", normalized_rank, label)
+			local sort_text = string.format("%05d_%05d_%s", normalized_rank, index, label) -- ランク、インデックス、ラベルでソート
 
 			local item = {
 				label = label,
