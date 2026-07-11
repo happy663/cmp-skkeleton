@@ -17,7 +17,7 @@ source.get_keyword_pattern = function()
 	if mode == "abbrev" then
 		return [[\%([a-zA-Z]\+\)]]
 	else
-		return [[\%([ぁ-ゖ]\+\)]]
+		return [[\%([ぁ-ゖァ-ヺー]\+\)]]
 	end
 end
 
