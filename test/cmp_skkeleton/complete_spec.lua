@@ -28,6 +28,11 @@ local function collect(s, request)
 end
 
 describe("source.complete", function()
+	it("matches katakana words containing a prolonged sound mark", function()
+		vim.g["skkeleton#mode"] = "hiragana"
+		assert.equals([[\%([ぁ-ゖァ-ヺー]\+\)]], make_source({}):get_keyword_pattern())
+	end)
+
 	-- (a) 単一候補の基本動作
 	it("returns correct fields for a single candidate", function()
 		local s = make_source({
