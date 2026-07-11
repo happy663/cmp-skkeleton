@@ -21,40 +21,65 @@ source.get_keyword_pattern = function()
 	end
 end
 
-source.complete = function(self, request, callback)
-	local candidates = self:_get_completion_result()
-
-	local preeditlen = self:_get_pre_edit_length()
-	local ranks = self:_get_ranks()
-
-	-- 送りあり候補を取得
-	local okuri_candidates = self:_get_okuri_candidates()
-
-	-- ランク情報をタイムスタンプで降順ソート（新しい選択が上位に）
+source._build_rank_map = function(ranks)
 	table.sort(ranks, function(a, b)
 		return a[2] > b[2]
 	end)
-
-	-- ランクマップ生成
 	local rank_map = {}
 	for i, rank_entry in ipairs(ranks) do
-		rank_map[rank_entry[1]] = i - 1 -- 0ベースのインデックス
+		rank_map[rank_entry[1]] = i - 1
 	end
+	return rank_map
+end
+
+source._get_base_kana_length = function(_, candidates)
+	local min_length = math.huge
+	for _, cs in pairs(candidates) do
+		local kana_length = vim.fn.strchars(cs[1])
+		min_length = math.min(min_length, kana_length)
+	end
+	return min_length
+end
+
+source._calculate_smart_rank = function(_, base_rank, actual_kana_length, input_kana_length)
+	if actual_kana_length == input_kana_length then
+		return base_rank - 500
+	elseif actual_kana_length == input_kana_length + 1 then
+		return base_rank - 100
+	else
+		return base_rank + (actual_kana_length - input_kana_length) * 200
+	end
+end
+
+source._parse_candidate = function(_, raw_candidate)
+	local label = string.gsub(raw_candidate, [[;.*$]], "")
+	local annotation_match = string.match(raw_candidate, [[;.*$]])
+	local annotation = annotation_match and string.gsub(annotation_match, [[^;]], "") or nil
+	return label, annotation
+end
+
+source._build_sort_text = function(_, normalized_rank, idx, label)
+	return string.format("%05d_%05d_%s", normalized_rank, idx, label)
+end
+
+source._build_documentation = function(_, kana, annotation)
+	if annotation then
+		return kana .. "\n" .. annotation
+	else
+		return kana
+	end
+end
+
+source.complete = function(self, request, callback)
+	local candidates = self:_get_completion_result()
+	local ranks = self:_get_ranks()
+	local okuri_candidates = self:_get_okuri_candidates()
+
+	local rank_map = source._build_rank_map(ranks)
+	local base_kana_length = self:_get_base_kana_length(candidates)
 
 	local items = {}
-	local added_labels = {} -- 重複排除用
-	local cnt = 0
-
-	local function get_base_kana_length(candidates)
-		local min_length = math.huge
-		for _, cs in pairs(candidates) do
-			local kana_length = vim.fn.strchars(cs[1])
-			min_length = math.min(min_length, kana_length)
-		end
-		return min_length
-	end
-	local base_kana_length = get_base_kana_length(candidates)
-
+	local added_labels = {}
 	-- ユーザー辞書ではない候補の優先度を保持するためのインデックス
 	-- 例: SKK_JISYO.Lの以下の順番を保持する
 	-- かんとう /関東/巻頭/完投/竿頭/敢闘/間道;舶来の織物/竿灯/完答/冠頭/
@@ -64,66 +89,25 @@ source.complete = function(self, request, callback)
 	-- 送りなし候補の処理
 	for _, cs in pairs(candidates) do
 		local kana = cs[1]
+		local actual_kana_length = vim.fn.strchars(kana)
 
 		for _, c in pairs(cs[2]) do
-			local label = string.gsub(c, [[;.*$]], "")
-			-- 重複チェック
+			local label, annotation = self:_parse_candidate(c)
 			if not added_labels[label] then
 				added_labels[label] = true
-
-				-- ランク情報から基本優先度を取得
-				local base_rank = rank_map[label] or 9999
 				idx = idx + 1
 
-				-- 読みの長さを考慮したスマートランク計算
-				local actual_kana_length = vim.fn.strchars(kana) -- 実際の読みの文字数
-				local input_kana_length = base_kana_length -- 入力された読みの文字数
-				local rank
+				local base_rank = rank_map[label] or 9999
+				local rank = self:_calculate_smart_rank(base_rank, actual_kana_length, base_kana_length)
+				local normalized_rank = rank + 10000
 
-				if actual_kana_length == input_kana_length then
-					rank = base_rank - 500 -- 読み完全一致ボーナス
-				elseif actual_kana_length == input_kana_length + 1 then
-					rank = base_rank - 100 -- 読み1文字差ボーナス
-				else
-					rank = base_rank + (actual_kana_length - input_kana_length) * 200 -- 長い読みペナルティ
-				end
-				-- - 補間: rank=-200 → normalized=9800 → "09800_補間"
-				-- - 補完: rank=-199 → normalized=9801 → "09801_補完"
-				-- - 保管: rank=-196 → normalized=9804 → "09804_保管"
-				local normalized_rank = rank + 10000 -- マイナス値を避けるためにオフセットを追加
-
-				-- print(
-				-- 	string.format(
-				-- 		"Processing: %s, Kana: %s(%d), input_kana_length: %d, base_rank: %d, rank: %d, normalized_rank: %d",
-				-- 		label,
-				-- 		kana,
-				-- 		actual_kana_length,
-				-- 		input_kana_length,
-				-- 		base_rank,
-				-- 		rank,
-				-- 		normalized_rank
-				-- 	)
-				-- )
-
-				local sort_text = string.format("%05d_%05d_%s", normalized_rank, idx, label) -- ランク、インデックス、ラベルでソート
-				local item = {
+				table.insert(items, {
 					label = label,
 					word = label,
 					filterText = kana,
-					sortText = sort_text,
-				}
-
-				-- print(string.format("  -> sortText: %s", sort_text))
-
-				local document = string.match(c, [[;.*$]])
-				if document then
-					item.documentation = kana .. "\n" .. string.gsub(document, [[^;]], "")
-				else
-					item.documentation = kana
-				end
-
-				cnt = cnt + 1
-				table.insert(items, item)
+					sortText = self:_build_sort_text(normalized_rank, idx, label),
+					documentation = self:_build_documentation(kana, annotation),
+				})
 			end
 		end
 	end
@@ -135,38 +119,29 @@ source.complete = function(self, request, callback)
 			added_labels[label] = true
 
 			local base_rank = rank_map[label] or 9999
-			local rank = base_rank + 500 -- 送りありペナルティ
-			local normalized_rank = rank + 10000
+			local normalized_rank = (base_rank + 500) + 10000
 
-			local sort_text = string.format("%05d_%05d_%s", normalized_rank, index, label) -- ランク、インデックス、ラベルでソート
-
-			local item = {
+			table.insert(items, {
 				label = label,
 				word = label,
 				filterText = okuri_item.kana,
-				sortText = sort_text,
+				sortText = self:_build_sort_text(normalized_rank, index, label),
 				documentation = okuri_item.kana,
 				data = {
 					midasi = okuri_item.midasi,
 					okuri = okuri_item.okuri,
 					okuriari = true,
 				},
-			}
-
-			cnt = cnt + 1
-			table.insert(items, item)
+			})
 		end
 	end
 
-	if cnt == 0 then
+	if #items == 0 then
 		callback()
 		return
 	end
 
-	callback({
-		items = items,
-		isIncomplete = true,
-	})
+	callback({ items = items, isIncomplete = true })
 end
 
 source.resolve = function(self, completion_item, callback)
