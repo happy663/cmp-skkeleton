@@ -17,12 +17,21 @@ use { 'rinx/cmp-skkeleton', after = { 'nvim-cmp', 'skkeleton' } }
 require('cmp').setup {
   sources = {
     { name = 'skkeleton' }
-  }
+  },
   view = {
     entries = 'native'
   }
 }
+
+vim.fn['skkeleton#config']({
+  completionBackend = 'nvim-cmp',
+})
 ```
+
+cmp-skkeleton registers the `nvim-cmp` completion backend for skkeleton. Selecting it with
+`completionBackend` lets `eggLikeNewline` confirm the active nvim-cmp item. This integration
+requires a skkeleton version that provides `skkeleton#register_completion_backend()` and the
+four-argument `completeCallback()` API.
 
 ## Demo
 
