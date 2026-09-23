@@ -9,6 +9,12 @@ local function make_source(opts)
 	s._get_pre_edit_length = function(_)
 		return opts.preedit_len or 0
 	end
+	s._get_pre_edit = function(_)
+		return opts.preedit or ""
+	end
+	s._get_marker = function(_)
+		return opts.marker or "▽"
+	end
 	s._get_ranks = function(_)
 		return opts.ranks or {}
 	end
@@ -188,8 +194,60 @@ describe("source.complete", function()
 		assert.is_truthy(item.sortText:match("^20499_"))
 	end)
 
-	-- (h) ranksのソート検証（値が大きいほど新しい → 降順ソート → rank_map順序）
-	it("sorts ranks by value descending to build rank_map", function()
+	-- (h) 補完確定時に必要な位置・候補情報
+	it("attaches exact marker and completion metadata to each item", function()
+		local bufnr = vim.api.nvim_get_current_buf()
+		local prefix = "既存▽文字 "
+		local preedit = "▽app"
+		local s = make_source({
+			candidates = { { "apple", { "アップル" } } },
+			preedit = preedit,
+			marker = "▽",
+		})
+
+		local result = collect(s, {
+			context = {
+				id = "context-1",
+				bufnr = bufnr,
+				cursor = { line = 0, character = vim.fn.strchars(prefix .. preedit) },
+				cursor_before_line = prefix .. preedit,
+			},
+		})
+
+		local metadata = result.items[1].data.cmp_skkeleton
+		assert.equals(bufnr, metadata.bufnr)
+		assert.equals(0, metadata.row)
+		assert.equals(#prefix, metadata.marker_col)
+		assert.equals("▽", metadata.marker)
+		assert.equals("apple", metadata.midasi)
+		assert.equals("アップル", metadata.word)
+		assert.equals("okurinasi", metadata.type)
+		assert.equals("アップル", metadata.inserted)
+		assert.is_truthy(metadata.id:match("context%-1"))
+	end)
+
+	it("attaches completion metadata when markerHenkan is empty", function()
+		local s = make_source({
+			candidates = { { "apple", { "アップル" } } },
+			preedit = "app",
+			marker = "",
+		})
+
+		local result = collect(s, {
+			context = {
+				id = "context-empty-marker",
+				bufnr = vim.api.nvim_get_current_buf(),
+				cursor = { line = 0, character = 3 },
+				cursor_before_line = "app",
+			},
+		})
+
+		assert.equals("", result.items[1].data.cmp_skkeleton.marker)
+		assert.equals(0, result.items[1].data.cmp_skkeleton.marker_col)
+	end)
+
+	-- (j) ranksのソート検証（値が大きいほど新しい → 降順ソート → rank_map順序）
+	it("sorts ranks by value descending to build_rank_map", function()
 		local s = make_source({
 			candidates = { { "てすと", { "テスト", "試験" } } },
 			preedit_len = 3,

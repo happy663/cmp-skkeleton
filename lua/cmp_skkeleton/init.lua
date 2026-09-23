@@ -1,7 +1,11 @@
 local source = {}
 
 source.new = function()
-	return setmetatable({}, { __index = source })
+	return setmetatable({
+		_completion_sequence = 0,
+		_finalized_completions = {},
+		_finalized_order = {},
+	}, { __index = source })
 end
 
 source.is_available = function()
@@ -70,10 +74,55 @@ source._build_documentation = function(_, kana, annotation)
 	end
 end
 
+source._get_completion_location = function(self, request)
+	local context = request and request.context
+	if not context or type(context.cursor_before_line) ~= "string" then
+		return nil
+	end
+
+	local preedit = self:_get_pre_edit()
+	local marker = self:_get_marker()
+	if type(preedit) ~= "string" or preedit == "" or type(marker) ~= "string" then
+		return nil
+	end
+	if preedit:sub(1, #marker) ~= marker or context.cursor_before_line:sub(-#preedit) ~= preedit then
+		return nil
+	end
+
+	return {
+		bufnr = context.bufnr,
+		row = context.cursor and context.cursor.line or nil,
+		marker_col = #context.cursor_before_line - #preedit,
+		marker = marker,
+		context_id = context.id,
+	}
+end
+
+source._build_completion_metadata = function(self, location, item_index, midasi, word, completion_type, inserted)
+	if not location or location.bufnr == nil or location.row == nil then
+		return nil
+	end
+
+	local context_id = location.context_id or "context"
+	return {
+		id = string.format("%s:%d:%s", context_id, self._completion_sequence, item_index),
+		bufnr = location.bufnr,
+		row = location.row,
+		marker_col = location.marker_col,
+		marker = location.marker,
+		midasi = midasi,
+		word = word,
+		type = completion_type,
+		inserted = inserted,
+	}
+end
+
 source.complete = function(self, request, callback)
 	local candidates = self:_get_completion_result()
 	local ranks = self:_get_ranks()
 	local okuri_candidates = self:_get_okuri_candidates()
+	self._completion_sequence = self._completion_sequence + 1
+	local location = self:_get_completion_location(request)
 
 	local rank_map = source._build_rank_map(ranks)
 	local base_kana_length = self:_get_base_kana_length(candidates)
@@ -101,12 +150,15 @@ source.complete = function(self, request, callback)
 				local rank = self:_calculate_smart_rank(base_rank, actual_kana_length, base_kana_length)
 				local normalized_rank = rank + 10000
 
+				local metadata =
+					self:_build_completion_metadata(location, "okurinasi:" .. idx, kana, label, "okurinasi", label)
 				table.insert(items, {
 					label = label,
 					word = label,
 					filterText = kana,
 					sortText = self:_build_sort_text(normalized_rank, idx, label),
 					documentation = self:_build_documentation(kana, annotation),
+					data = metadata and { cmp_skkeleton = metadata } or nil,
 				})
 			end
 		end
@@ -121,6 +173,18 @@ source.complete = function(self, request, callback)
 			local base_rank = rank_map[label] or 9999
 			local normalized_rank = (base_rank + 500) + 10000
 
+			local okuri_len = vim.fn.strchars(okuri_item.okuri)
+			local word_len = vim.fn.strchars(label)
+			local word_without_okuri = vim.fn.strcharpart(label, 0, word_len - okuri_len)
+			local metadata = self:_build_completion_metadata(
+				location,
+				"okuriari:" .. index,
+				okuri_item.midasi,
+				word_without_okuri,
+				"okuriari",
+				label
+			)
+
 			table.insert(items, {
 				label = label,
 				word = label,
@@ -131,6 +195,7 @@ source.complete = function(self, request, callback)
 					midasi = okuri_item.midasi,
 					okuri = okuri_item.okuri,
 					okuriari = true,
+					cmp_skkeleton = metadata,
 				},
 			})
 		end
@@ -148,30 +213,129 @@ source.resolve = function(self, completion_item, callback)
 	callback(completion_item)
 end
 
-source.execute = function(self, completion_item, callback)
-	local kana = completion_item.filterText
-	local word = completion_item.label
+source._remember_finalized = function(self, id)
+	self._finalized_completions[id] = true
+	table.insert(self._finalized_order, id)
+	if #self._finalized_order > 128 then
+		local expired = table.remove(self._finalized_order, 1)
+		self._finalized_completions[expired] = nil
+	end
+end
 
-	-- 送りあり候補の場合
-	if completion_item.data and completion_item.data.okuriari then
-		local midasi = completion_item.data.midasi
-		-- 送り仮名を除いた候補本体を取得
-		local okuri = completion_item.data.okuri
-		local okuri_len = vim.fn.strchars(okuri)
-		local word_len = vim.fn.strchars(word)
-		local word_without_okuri = vim.fn.strcharpart(word, 0, word_len - okuri_len)
-
-		vim.fn["denops#request"]("skkeleton", "completeCallback", { midasi, word_without_okuri, "okuriari" })
-	else
-		-- 既存: 送りなし処理
-		self:_register_henkan_result(kana, word)
+source._finalize_completion = function(self, completion_item)
+	local metadata = completion_item and completion_item.data and completion_item.data.cmp_skkeleton
+	if not metadata or self._finalized_completions[metadata.id] then
+		return false
+	end
+	if metadata.bufnr ~= vim.api.nvim_get_current_buf() or not vim.api.nvim_buf_is_valid(metadata.bufnr) then
+		return false
 	end
 
+	local line_count = vim.api.nvim_buf_line_count(metadata.bufnr)
+	if metadata.row < 0 or metadata.row >= line_count then
+		return false
+	end
+	local line = vim.api.nvim_buf_get_lines(metadata.bufnr, metadata.row, metadata.row + 1, false)[1]
+	local marker_start = metadata.marker_col + 1
+	local inserted_start = marker_start + #metadata.marker
+	if line:sub(marker_start, inserted_start - 1) ~= metadata.marker then
+		return false
+	end
+	if
+		metadata.inserted == ""
+		or line:sub(inserted_start, inserted_start + #metadata.inserted - 1) ~= metadata.inserted
+	then
+		return false
+	end
+
+	local ok, err =
+		pcall(self._complete_callback, self, metadata.midasi, metadata.word, metadata.type, metadata.inserted)
+	if not ok then
+		vim.notify("cmp-skkeleton: failed to notify skkeleton: " .. tostring(err), vim.log.levels.ERROR)
+		return false
+	end
+
+	self:_remember_finalized(metadata.id)
+	local cursor = vim.api.nvim_win_get_cursor(0)
+	vim.api.nvim_buf_set_text(
+		metadata.bufnr,
+		metadata.row,
+		metadata.marker_col,
+		metadata.row,
+		metadata.marker_col + #metadata.marker,
+		{}
+	)
+	if cursor[1] - 1 == metadata.row and cursor[2] > metadata.marker_col then
+		vim.api.nvim_win_set_cursor(0, { cursor[1], math.max(metadata.marker_col, cursor[2] - #metadata.marker) })
+	end
+
+	return true
+end
+
+source.execute = function(self, completion_item, callback)
+	self:_finalize_completion(completion_item)
 	callback(completion_item)
+end
+
+source._register_completion_backend = function(_, name, backend)
+	vim.fn["skkeleton#register_completion_backend"](name, backend)
+end
+
+source._defer_completion_backend_registration = function(_, callback)
+	vim.api.nvim_create_autocmd("User", {
+		pattern = "skkeleton-initialize-pre",
+		once = true,
+		callback = callback,
+	})
+end
+
+source.setup = function(self, cmp, schedule)
+	schedule = schedule or vim.schedule
+	local backend = {
+		complete_info = function()
+			local visible = cmp.visible()
+			return {
+				pum_visible = visible,
+				selected = visible and cmp.get_active_entry() ~= nil and 0 or -1,
+			}
+		end,
+		confirm_key = "<Cmd>lua require('cmp').confirm({ select = true })",
+	}
+	local function register_backend()
+		return pcall(self._register_completion_backend, self, "nvim-cmp", backend)
+	end
+	if not register_backend() then
+		self:_defer_completion_backend_registration(function()
+			local ok, err = register_backend()
+			if not ok then
+				vim.notify("cmp-skkeleton: failed to register nvim-cmp backend: " .. tostring(err), vim.log.levels.WARN)
+			end
+		end)
+	end
+
+	cmp.event:on("complete_done", function(event)
+		local entry = event and event.entry
+		if not entry or not entry.source or entry.source.name ~= "skkeleton" then
+			return
+		end
+		local completion_item = entry.completion_item
+		schedule(function()
+			self:_finalize_completion(completion_item)
+		end)
+	end)
 end
 
 source._get_pre_edit_length = function(_)
 	return vim.fn["denops#request"]("skkeleton", "getPreEditLength", {})
+end
+
+source._get_pre_edit = function(_)
+	return vim.fn["denops#request"]("skkeleton", "getPreEdit", {})
+end
+
+source._get_marker = function(_)
+	local config = vim.fn["denops#request"]("skkeleton", "getConfig", {})
+	return config.markerHenkan
 end
 
 source._get_prefix = function(_)
@@ -233,8 +397,8 @@ source._get_okuri_candidates = function(_)
 	return candidates
 end
 
-source._register_henkan_result = function(_, kana, word)
-	return vim.fn["denops#request"]("skkeleton", "registerHenkanResult", { kana, word })
+source._complete_callback = function(_, midasi, word, completion_type, inserted)
+	return vim.fn["denops#request"]("skkeleton", "completeCallback", { midasi, word, completion_type, inserted })
 end
 
 source._get_rank_file_path = function(_)
